@@ -1,5 +1,5 @@
 [project]
-name = "poem"
+name = "strophe"
 version = "0.1.0"
 description = "Signed snippets, hiccup, and a dual-eval loop. The web that should have been."
 readme = "README.md"
@@ -18,8 +18,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/tommy-mor/poem"
-Repository = "https://github.com/tommy-mor/poem"
+Homepage = "https://github.com/tommy-mor/strophe"
+Repository = "https://github.com/tommy-mor/strophe"
 
 [build-system]
 requires = ["hatchling"]
