@@ -66,9 +66,16 @@
     @(p/process ["git" "tag" "-a" tag "-m" (str "Release " tag)] {:inherit true})
     @(p/process ["git" "push" "origin" "main" tag] {:inherit true})
 
+    ;; Create GitHub release (triggers the publish workflow)
+    (println (str "Creating GitHub release " tag "..."))
+    @(p/process ["gh" "release" "create" tag
+                 "--title" tag
+                 "--notes" (str "Release " tag)]
+                {:inherit true})
+
     (println "")
-    (println (str "Done. Tag " tag " pushed."))
-    (println "Watch the release workflow at:")
+    (println (str "Done. " tag " released."))
+    (println "Watch the publish workflow at:")
     (println "  https://github.com/tommy-mor/strophe/actions")))
 
 (apply release *command-line-args*)
