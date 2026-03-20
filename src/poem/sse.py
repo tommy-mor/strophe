@@ -43,11 +43,7 @@ document.addEventListener('submit', async e => {
 def shell_html(sse_path: str | None = None, idiomorph_url: str | None = None) -> str:
     """Generate the shell HTML with optional custom SSE path and Idiomorph URL."""
     idi = idiomorph_url or "https://unpkg.com/idiomorph@0.3.0/dist/idiomorph.esm.js"
-    sse = (
-        f"'{sse_path}'"
-        if sse_path
-        else "(location.pathname || '/').replace(/\\/$/, '') + '/sse'"
-    )
+    sse = f"'{sse_path}'" if sse_path else "'/sse'"
     return (
         SHELL_HTML_TEMPLATE
         .replace("__IDIOMORPH_URL__", idi)

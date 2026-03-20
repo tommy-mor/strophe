@@ -62,7 +62,7 @@ def delete(todo_id):
     ]))
 ```
 
-The `/eval` route verifies the signature and evals the snippet. `verify_snippet` raises `SnippetExecutionError` with a status code.
+The `POST /` route verifies the signature and evals the snippet. `verify_snippet` raises `SnippetExecutionError` with a status code.
 
 ```python
 from strophe import SnippetExecutionError
@@ -105,17 +105,5 @@ async def sse(request):
         ])
     return StreamingResponse(generate(), media_type="text/event-stream")
 ```
-
-`shell_html()` builds the SSE URL from the current route by default:
-
-```js
-(location.pathname || '/').replace(/\/$/, '') + '/sse'
-```
-
-So:
-- at `/` -> `/sse`
-- at `/todos` -> `/todos/sse`
-
-This keeps SSE working when the app is mounted under a subpath instead of the site root.
 
 `pip install strophe`
