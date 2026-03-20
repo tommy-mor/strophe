@@ -1,7 +1,7 @@
 # evaleval
 
-The DOM is modified _ONLY_ through *javascript code snippets* sent over the wire to the browers **eval** function.
-Server actions execute _ONLY_ through *python code snippets* sent over the wire to python's **eval** function.
+Browser DOM is modified _ONLY_ through *javascript code snippets* sent over the wire to the browers **eval** function.
+Backend actions execute _ONLY_ through *python code snippets* sent over the wire to python's **eval** function.
 
 The entire client is 10 lines of javascript:
 
@@ -54,17 +54,16 @@ So the handler function from the form is called directly with form arguments. An
 def add(text):
     t = {"id": uuid.uuid4().hex[:8], "text": text, "done": False}
     TODOS.append(t)
-    return PlainTextResponse("""
-const x = document.getElementById('add-form');
-x.innerHtml = ...(splice in hiccup somehow)... 
-
-const x = document.getElementById('todo-list');
-x.appendAdjacency = ...(splice in hiccup somehow)... 
-
-... you get the point...
-
-    """)
+    escaped = t["text"].replace("`", "\\`")
+    return PlainTextResponse(f"""
+Idiomorph.morph(document.querySelector('#add-form'), `<form id="add-form">...</form>`);
+document.querySelector('#todo-list').insertAdjacentHTML('beforeend', `<li id="todo-{t["id"]}">{escaped}</li>`);
+Idiomorph.morph(document.querySelector('p.count'), `<p class="count">...</p>`);
+console.log('todo added', {text!r});
+""")
 ```
+
+Ew.
 
 However, I have instead built an embedded data-driven DSL much like [specter](https://github.com/redplanetlabs/specter), which lets you construct js snippets in fluent python.
 The number we are indexing into is the arity of how deep we can index into until it executes the path, rendering it into a js string.
@@ -82,6 +81,7 @@ def add(text):
         Three[Selector("#add-form")][MORPH][add_form()],
         Three[Selector("#todo-list")][APPEND][todo_item(t)],
         Three[Selector("p.count")][MORPH][remaining_count()],
+        f"console.log('todo added', {text})"
     ]))
 
 def delete(todo_id):
