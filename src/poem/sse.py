@@ -12,15 +12,14 @@ def exec_event(js: str | list[str] | tuple[str, ...]) -> str:
     return "\n".join(lines)
 
 
-SHELL_HTML = """<!DOCTYPE html>
+SHELL_HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body>
 <script type="module">
-import { Idiomorph } from 'https://unpkg.com/idiomorph@0.3.0/dist/idiomorph.esm.js';
+import { Idiomorph } from '__IDIOMORPH_URL__';
 window.Idiomorph = Idiomorph;
-const ssePath = (location.pathname || '/').replace(/\\/$/, '') + '/sse';
-const es = new EventSource(ssePath);
+const es = new EventSource(__SSE_PATH__);
 es.addEventListener('exec', e => {
   eval(e.data);
 });
@@ -42,39 +41,15 @@ document.addEventListener('submit', async e => {
 
 
 def shell_html(sse_path: str | None = None, idiomorph_url: str | None = None) -> str:
-    """Generate the shell HTML with optional custom SSE path and Idiomorph URL.
-
-    If no arguments given, returns the default SHELL_HTML.
-    """
-    if sse_path is None and idiomorph_url is None:
-        return SHELL_HTML
-
+    """Generate the shell HTML with optional custom SSE path and Idiomorph URL."""
     idi = idiomorph_url or "https://unpkg.com/idiomorph@0.3.0/dist/idiomorph.esm.js"
-    sse = f"'{sse_path}'" if sse_path else "(location.pathname || '/').replace(/\\/$/, '') + '/sse'"
-
-    return f"""<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body>
-<script type="module">
-import {{ Idiomorph }} from '{idi}';
-window.Idiomorph = Idiomorph;
-const es = new EventSource({sse});
-es.addEventListener('exec', e => {{
-  eval(e.data);
-}});
-document.addEventListener('submit', async e => {{
-  e.preventDefault();
-  const f = e.target;
-  try {{
-    const r = await fetch(f.action, {{ method: 'POST', body: new URLSearchParams(new FormData(f)) }});
-    const t = await r.text();
-    if (t) eval(t);
-  }} catch (err) {{
-    console.error(err);
-  }}
-  if (f.dataset.reset !== 'false') f.reset();
-}});
-</script>
-</body>
-</html>"""
+    sse = (
+        f"'{sse_path}'"
+        if sse_path
+        else "(location.pathname || '/').replace(/\\/$/, '') + '/sse'"
+    )
+    return (
+        SHELL_HTML_TEMPLATE
+        .replace("__IDIOMORPH_URL__", idi)
+        .replace("__SSE_PATH__", sse)
+    )

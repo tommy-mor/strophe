@@ -79,6 +79,14 @@ async def do(request):
         return PlainTextResponse(str(e), status_code=500)
 ```
 
+`eval` only accepts a single expression. Multi-line snippets and `return ...` statements will fail with `SyntaxError`.
+
+If you want side effects plus a return value, use an expression pattern like:
+
+```python
+(print("form callback for add todo", $text), add($text))[1]
+```
+
 SSE pushes the initial page as JS the browser evals.
 
 ```python
@@ -97,5 +105,17 @@ async def sse(request):
         ])
     return StreamingResponse(generate(), media_type="text/event-stream")
 ```
+
+`shell_html()` builds the SSE URL from the current route by default:
+
+```js
+(location.pathname || '/').replace(/\/$/, '') + '/sse'
+```
+
+So:
+- at `/` -> `/sse`
+- at `/todos` -> `/todos/sse`
+
+This keeps SSE working when the app is mounted under a subpath instead of the site root.
 
 `pip install strophe`
