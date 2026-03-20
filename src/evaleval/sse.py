@@ -16,6 +16,12 @@ SHELL_HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body>
+<!--
+Keep app content inside a stable mount node.
+If server patches morph <body> itself, this script tag can be replaced, which restarts the
+EventSource connection and can duplicate repeated auth/login paints.
+-->
+<div id="app"></div>
 <script type="module">
 import { Idiomorph } from '__IDIOMORPH_URL__';
 window.Idiomorph = Idiomorph;

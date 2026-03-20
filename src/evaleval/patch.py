@@ -6,6 +6,9 @@ from evaleval.hiccup import render
 class Step:
     pass
 
+# Backward-compatible export: older code imports Action from evaleval.patch.
+Action = Step
+
 
 @dataclass(frozen=True)
 class Selector(Step):
