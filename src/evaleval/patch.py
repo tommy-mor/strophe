@@ -1,25 +1,31 @@
+from dataclasses import dataclass, field
 from evaleval.hiccup import render
 
 
+@dataclass(frozen=True)
 class Selector:
-    def __init__(self, query): self.query = query
+    query: str
 
+
+@dataclass(frozen=True)
 class Eval:
-    def __init__(self, code): self.code = code
+    code: str
 
+
+@dataclass(frozen=True)
 class Action:
-    def __init__(self, name, requires=None):
-        self.name = name
-        self.requires = requires  # Selector or Action that must precede this
+    name: str
+    requires: str | None = field(default=None, compare=False, repr=False)
 
-MORPH   = Action("MORPH", requires=Selector)
-PREPEND = Action("PREPEND", requires=Selector)
-APPEND  = Action("APPEND", requires=Selector)
+
+MORPH   = Action("MORPH",   requires="Selector")
+PREPEND = Action("PREPEND", requires="Selector")
+APPEND  = Action("APPEND",  requires="Selector")
 REMOVE  = Action("REMOVE")
-OUTER   = Action("OUTER", requires=Selector)
-CLASSES = Action("CLASSES", requires=Selector)
-ADD     = Action("ADD", requires=CLASSES)
-TOGGLE  = Action("TOGGLE", requires=CLASSES)
+OUTER   = Action("OUTER",   requires="Selector")
+CLASSES = Action("CLASSES", requires="Selector")
+ADD     = Action("ADD",     requires="CLASSES")
+TOGGLE  = Action("TOGGLE",  requires="CLASSES")
 
 
 def _validate_step(items):
@@ -27,75 +33,71 @@ def _validate_step(items):
     prior = items[:-1]
 
     prior_actions = [x for x in prior if isinstance(x, Action)]
+    prior_action_names = {a.name for a in prior_actions}
     has_selector = any(isinstance(x, Selector) for x in prior)
-    prior_data = [x for x in prior if not isinstance(x, (Selector, Action, Eval))]
+    has_data = any(not isinstance(x, (Selector, Action, Eval)) for x in prior)
 
-    if prior_data:
-        raise ValueError(f"Data must be the last item in the chain")
+    if has_data:
+        raise ValueError("Data must be the last item in the chain")
 
-    if isinstance(item, Selector) and prior_actions:
-        raise ValueError(f"Selector must come before actions, not after {prior_actions[-1].name}")
+    match item:
+        case Selector() if prior_actions:
+            raise ValueError(f"Selector must come before actions, not after {prior_actions[-1].name}")
+        case Action(name=name) if name in ("MORPH", "PREPEND", "APPEND", "OUTER", "CLASSES") and not has_selector:
+            raise ValueError(f"{name} requires a Selector before it")
+        case Action(name=name) if name in ("ADD", "TOGGLE") and "CLASSES" not in prior_action_names:
+            raise ValueError(f"{name} requires CLASSES before it")
+        case Action(name="REMOVE") if prior_actions and "CLASSES" not in prior_action_names:
+            raise ValueError(f"Selector must come before actions, not after {prior_actions[-1].name}")
 
-    if isinstance(item, Action) and item.requires is not None:
-        if item.requires is Selector:
-            if not has_selector:
-                raise ValueError(f"{item.name} requires a Selector before it")
-        elif isinstance(item.requires, Action):
-            if item.requires not in prior_actions:
-                raise ValueError(f"{item.name} requires {item.requires.name} before it")
+
+def _sel_expr(query):
+    safe = query.replace("\\", "\\\\").replace('"', '\\"')
+    return f'document.querySelector("{safe}")'
 
 
-def _resolve(items):
-    selector = None
-    actions  = []
-    code     = None
-    data     = None
+def _to_html(data):
+    if data is None:
+        return ""
+    raw = render(data) if not isinstance(data, str) else data
+    return raw.replace("`", "\\`").replace("${", "\\${")
 
-    for item in items:
-        if isinstance(item, Selector): selector = item.query
-        elif isinstance(item, Action): actions.append(item)
-        elif isinstance(item, Eval):   code     = item.code
-        else:                          data     = item
+
+def _compile(items):
+    selector  = next((x for x in items if isinstance(x, Selector)), None)
+    eval_node = next((x for x in items if isinstance(x, Eval)), None)
+    actions   = [x for x in items if isinstance(x, Action)]
+    data      = next((x for x in items if not isinstance(x, (Selector, Action, Eval))), None)
+
+    lines = []
+    ref = "null"
 
     if selector:
-        safe = selector.replace("\\", "\\\\").replace('"', '\\"')
-        sel_js = f'document.querySelector("{safe}")'
-    else:
-        sel_js = "null"
+        ref = "_0"
+        lines.append(f"const _0 = {_sel_expr(selector.query)}")
 
-    if code:
+    if eval_node:
+        code = eval_node.code
         if code.startswith("=>"):
-            body = code.replace("=>", "", 1).strip()
-            return f"(($) => {{ {body} }})({sel_js})"
-        return code
+            lines.append(code[2:].strip().replace("$", ref))
+        else:
+            lines.append(code)
+        return ";\n".join(lines)
 
-    html = ""
-    if data is not None:
-        raw = render(data) if not isinstance(data, str) else data
-        html = raw.replace("`", "\\`").replace("${", "\\${")
+    html = _to_html(data)
 
-    if CLASSES in actions:
-        if REMOVE in actions:
-            return f"{sel_js}?.classList.remove('{data}')"
-        if ADD in actions:
-            return f"{sel_js}?.classList.add('{data}')"
-        if TOGGLE in actions:
-            return f"{sel_js}?.classList.toggle('{data}')"
+    match tuple(a.name for a in actions):
+        case ("REMOVE",):                  lines.append(f"{ref}?.remove()")
+        case ("MORPH",):                   lines.append(f"Idiomorph.morph({ref}, `{html}`)")
+        case ("PREPEND",):                 lines.append(f"{ref}.insertAdjacentHTML('afterbegin', `{html}`)")
+        case ("APPEND",):                  lines.append(f"{ref}.insertAdjacentHTML('beforeend', `{html}`)")
+        case ("OUTER",):                   lines.append(f"{ref}.outerHTML = `{html}`")
+        case ("CLASSES", "ADD"):           lines.append(f"{ref}?.classList.add('{data}')")
+        case ("CLASSES", "REMOVE"):        lines.append(f"{ref}?.classList.remove('{data}')")
+        case ("CLASSES", "TOGGLE"):        lines.append(f"{ref}?.classList.toggle('{data}')")
+        case _:                            lines.append("console.warn('unresolved patch chain')")
 
-    action = actions[0] if actions else None
-
-    if action == MORPH:
-        return f"Idiomorph.morph({sel_js}, `{html}`)"
-    if action == PREPEND:
-        return f"{sel_js}.insertAdjacentHTML('afterbegin', `{html}`)"
-    if action == APPEND:
-        return f"{sel_js}.insertAdjacentHTML('beforeend', `{html}`)"
-    if action == REMOVE:
-        return f"{sel_js}?.remove()"
-    if action == OUTER:
-        return f"{sel_js}.outerHTML = `{html}`"
-
-    return "console.warn('unresolved patch chain')"
+    return ";\n".join(lines)
 
 
 class DepthChain:
@@ -107,11 +109,11 @@ class DepthChain:
         items = self.items + [item]
         _validate_step(items)
         if len(items) >= self.depth:
-            return _resolve(items)
+            return _compile(items)
         return DepthChain(self.depth, items)
 
     def __str__(self):
-        return _resolve(self.items)
+        return _compile(self.items)
 
 
 One   = DepthChain(1)
