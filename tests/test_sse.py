@@ -15,6 +15,7 @@ def test_shell_html_defaults_include_fixed_sse_path():
     html = shell_html()
     assert "https://unpkg.com/idiomorph@0.3.0/dist/idiomorph.esm.js" in html
     assert "new EventSource('/sse')" in html
+    assert '<div id="app"></div>' in html
     assert "__IDIOMORPH_URL__" not in html
     assert "__SSE_PATH__" not in html
 
