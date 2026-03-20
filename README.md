@@ -1,14 +1,17 @@
 # evaleval
 
-`evaleval` is a tiny server-driven web pattern: signed Python expressions in forms, eval on submit, and UI patching over SSE.
+The DOM is modified _ONLY_ through *javascript code snippets* sent over the wire to the browers **eval** function.
+Server actions execute _ONLY_ through *python code snippets* sent over the wire to python's **eval** function.
 
-The entire client.
+The entire client is 10 lines of javascript:
 
 ```js
 import { Idiomorph } from 'idiomorph';
 window.Idiomorph = Idiomorph;
+
 const es = new EventSource('/sse');
 es.addEventListener('exec', e => eval(e.data));
+
 document.addEventListener('submit', async e => {
   e.preventDefault();
   const r = await fetch(e.target.action, { method: 'POST', body: new FormData(e.target) });
@@ -20,17 +23,16 @@ document.addEventListener('submit', async e => {
 Three endpoints. No framework.
 
 ```
-GET  /       — serve the shell
-GET  /sse    — push what you see
-POST /     — verify, eval
+GET  /       — serve the shell, which is just a script tag with the above js snippet.
+GET  /sse    — push js snippets to the browser, if your app has a push path.
+POST /     — verify, eval in python, return js code to be eval'd
 ```
 
 ## Example: [evaleval-todo](https://github.com/tommy-mor/evaleval-todo)
 
-A todo list in ~170 lines.
+`evaleval` also includes a quick implementation of clojure's [hiccup](https://github.com/weavejester/hiccup), a data-driven embedded DSL for rendering DOM nodes in an ergonomic way.
 
-Forms are data. They carry their own signed handlers.
-
+Observe this example:
 ```python
 from evaleval import Signer, Three, Two, Selector, MORPH, APPEND, REMOVE
 
@@ -38,13 +40,39 @@ signer = Signer()
 
 def add_form():
     return ["form", {"action": "/", "method": "post"},
-        *signer.snippet_hidden("add($text)"),
-        ["input", {"type": "text", "name": "text", "placeholder": "what needs doing?"}],
+        *signer.snippet_hidden("add($new-todo-body)"),
+        ["input", {"type": "text", "name": "new-todo-body", "placeholder": "what needs doing?"}],
         ["button", {"type": "submit"}, "add"],
     ]
 ```
+All forms have a handler. In a traditional stack, it would be pointed to by a url which points to a routing table which points to a handler function. In `evaleval`, the handler is _embedded into the form itself_.
 
-Sandbox functions return JS patch chains. The chains say how many parts they have, then become strings and disappear.
+The `add($new-todo-body)` is sent directly to python's `eval` with `$new-todo-body` sent through python's `repr` and spliced into the python source string. The source string must be an expression not a statement, as it must have a return value. Because as you'll see later, the result of `eval` is _returned directly to the client_.
+
+So the handler function from the form is called directly with form arguments. And it returns javscript code. Now how do you write js snippets ergonomically in python? You could write them directly:
+```python
+def add(text):
+    t = {"id": uuid.uuid4().hex[:8], "text": text, "done": False}
+    TODOS.append(t)
+    return PlainTextResponse("""
+const x = document.getElementById('add-form');
+x.innerHtml = ...(splice in hiccup somehow)... 
+
+const x = document.getElementById('todo-list');
+x.appendAdjacency = ...(splice in hiccup somehow)... 
+
+... you get the point...
+
+    """)
+```
+
+However, I have instead built an embedded data-driven DSL much like [specter](https://github.com/redplanetlabs/specter), which lets you construct js snippets in fluent python.
+The number we are indexing into is the arity of how deep we can index into until it executes the path, rendering it into a js string.
+The details of this process are fairly simple and are described [here](https://github.com/tommy-mor/evaleval/blob/main/src/evaleval/patch.py).
+The indexable arity objects are also just very cool.
+
+The most common arity path pattern is `Three[dom selector][action][hiccup data]`.
+
 
 ```python
 def add(text):
@@ -64,7 +92,12 @@ def delete(todo_id):
     ]))
 ```
 
-The `POST /` route verifies the signature and evals the snippet. `verify_snippet` raises `SnippetExecutionError` with a status code.
+These js snippets go directly into the browser's `eval` function, so you can do whatever you want.
+
+```python
+Two[Selector("#progress-bar")][Eval(f"=> $.width = '{width}%'")]
+```
+# Security
 
 ```python
 from evaleval import SnippetExecutionError
@@ -75,37 +108,23 @@ async def do(request):
     try:
         snippet = signer.verify_snippet(form)
         return eval(snippet)
+
     except SnippetExecutionError as e:
         return PlainTextResponse(e.message, status_code=e.status_code)
-    except Exception as e:
-        return PlainTextResponse(str(e), status_code=500)
 ```
 
-`eval` only accepts a single expression. Multi-line snippets and `return ...` statements will fail with `SyntaxError`.
+Verify snippet consumes the nonce, so for each GET you can only press each button once.
+Verify snippet checks the HMAC against the provided snippet, restricting code running on the server to be only code that the server itself produces. 
+So if a user can't do an action, don't sign a snippet with that action for them.
 
-If you want side effects plus a return value, use an expression pattern like:
+Notice this line in the todo submit form handler:
 
 ```python
-(print("form callback for add todo", $text), add($text))[1]
+Three[Selector("#add-form")][MORPH][add_form()],
 ```
 
-SSE pushes the initial page as JS the browser evals.
+This is neceseary. Because each action is only allowed exactly once per GET. But you don't want to have to reGET the page to send another todo. So a new nonce is required to be generated by add_form(), which returns hiccup, which is rendered to an htmlstring, which is morphed into the dom at `#add-form`.
 
-```python
-from evaleval import exec_event, shell_html, One, Eval
+Each snippet is not only a continuation, but also a capability ticket.
 
-@app.get("/")
-async def index():
-    return HTMLResponse(shell_html())
-
-@app.get("/sse")
-async def sse(request):
-    async def generate():
-        yield exec_event([
-            One[Eval("document.title = 'todos'")],
-            Three[Selector("body")][MORPH][["body", page()]],
-        ])
-    return StreamingResponse(generate(), media_type="text/event-stream")
-```
-
-`pip install evaleval`
+`uv install evaleval`
