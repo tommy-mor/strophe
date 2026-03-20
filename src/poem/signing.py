@@ -81,8 +81,8 @@ class Signer:
             ["input", {"type": "hidden", "name": "__nonce__", "value": nonce}],
         ]
 
-    def execute_signed_form(self, form: Mapping[str, Any], bindings: Mapping[str, Any]):
-        """Verify and execute a signed snippet payload from form data."""
+    def verify_snippet(self, form: Mapping[str, Any]) -> str:
+        """Verify signed form payload and return substituted snippet."""
         snippet = str(form.get("__snippet__", ""))
         sig = str(form.get("__sig__", ""))
         nonce = str(form.get("__nonce__", ""))
@@ -95,12 +95,7 @@ class Signer:
             raise SnippetExecutionError("Invalid nonce", status_code=403)
 
         form_data = {k: str(v) for k, v in form.items() if not k.startswith("__")}
-        snippet = apply_snippet_substitutions(snippet, form_data)
-
-        try:
-            return eval(snippet, {"__builtins__": {}}, dict(bindings))
-        except Exception as e:
-            raise SnippetExecutionError(str(e), status_code=500) from e
+        return apply_snippet_substitutions(snippet, form_data)
 
 
 class SnippetExecutionError(Exception):

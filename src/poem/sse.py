@@ -1,8 +1,10 @@
 """SSE helpers for the dual-eval loop."""
 
 
-def exec_event(js: str) -> str:
-    """Wrap a JavaScript string as an SSE 'exec' event."""
+def exec_event(js: str | list[str] | tuple[str, ...]) -> str:
+    """Wrap JavaScript code as an SSE 'exec' event."""
+    if isinstance(js, (list, tuple)):
+        js = ";".join(js)
     lines = ["event: exec"]
     for line in js.split('\n'):
         lines.append(f"data: {line}")
