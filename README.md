@@ -15,65 +15,87 @@ document.addEventListener('submit', async e => {
 });
 ```
 
-The entire server.
+Three endpoints. No framework.
+
+```
+GET  /       — serve the shell
+GET  /sse    — push what you see
+POST /do     — verify, eval
+```
+
+## Example: [strophe-todo](https://github.com/tommy-mor/strophe-todo)
+
+A todo list in ~170 lines.
+
+Forms are data. They carry their own signed handlers.
 
 ```python
+from strophe import Signer, Three, Two, Selector, MORPH, APPEND, REMOVE
+
 signer = Signer()
+
+def add_form():
+    return ["form", {"action": "/do", "method": "post"},
+        *signer.snippet_hidden("add($text)"),
+        ["input", {"type": "text", "name": "text", "placeholder": "what needs doing?"}],
+        ["button", {"type": "submit"}, "add"],
+    ]
+```
+
+Sandbox functions return JS patch chains. The chains say how many parts they have, then become strings and disappear.
+
+```python
+def add(text):
+    t = {"id": uuid.uuid4().hex[:8], "text": text, "done": False}
+    TODOS.append(t)
+    return PlainTextResponse(";".join([
+        Three[Selector("#add-form")][MORPH][add_form()],
+        Three[Selector("#todo-list")][APPEND][todo_item(t)],
+        Three[Selector("p.count")][MORPH][remaining_count()],
+    ]))
+
+def delete(todo_id):
+    TODOS.remove(_find(todo_id))
+    return PlainTextResponse(";".join([
+        Two[Selector(f"#todo-{todo_id}")][REMOVE],
+        Three[Selector("p.count")][MORPH][remaining_count()],
+    ]))
+```
+
+The `/do` route verifies the signature and evals the snippet. `verify_snippet` raises `SnippetExecutionError` with a status code.
+
+```python
+from strophe import SnippetExecutionError
 
 @app.post("/do")
 async def do(request):
     form = await request.form()
-    snippet = signer.verify_snippet(form)
-    return eval(snippet)
+    try:
+        snippet = signer.verify_snippet(form)
+        return eval(snippet)
+    except SnippetExecutionError as e:
+        return PlainTextResponse(e.message, status_code=e.status_code)
+    except Exception as e:
+        return PlainTextResponse(str(e), status_code=500)
 ```
 
-Pages are data.
+SSE pushes the initial page as JS the browser evals.
 
 ```python
-def login_form():
-    return ["div.login",
-        ["form", {"action": "/do", "method": "post"},
-            *signer.snippet_hidden("login($password)"),
-            ["input", {"type": "password", "name": "password"}],
-            ["button", "enter"],
-        ],
-    ]
+from strophe import exec_event, shell_html, One, Eval
+
+@app.get("/")
+async def index():
+    return HTMLResponse(shell_html())
+
+@app.get("/sse")
+async def sse(request):
+    async def generate():
+        yield exec_event([
+            One[Eval("document.title = 'todos'")],
+            Three[Selector("body")][MORPH][["body", page()]],
+        ])
+    return StreamingResponse(generate(), media_type="text/event-stream")
 ```
 
-Forms carry their own handlers. Signed, nonced, one-use.
-
-```python
-signer.snippet_hidden("delete_item($id)")
-# => [
-#   ["input", {"type": "hidden", "name": "__snippet__", "value": "delete_item($id)"}],
-#   ["input", {"type": "hidden", "name": "__sig__",     "value": "a8Kj..."}],
-#   ["input", {"type": "hidden", "name": "__nonce__",   "value": "e7f2..."}],
-# ]
-```
-
-The server pushes JS through SSE. The chains say how many parts they have, then become strings and disappear.
-
-```python
-from strophe import One, Three, Four, Selector, MORPH, PREPEND, CLASSES, ADD
-
-Three[Selector("#events")][PREPEND][rendered]
-# => "document.querySelector(\"#events\").insertAdjacentHTML('afterbegin', `<div>...</div>`)"
-
-Three[Selector("form.go-form")][MORPH][new_form]
-# => "Idiomorph.morph(document.querySelector(\"form.go-form\"), `<form>...</form>`)"
-
-Four[Selector(".btn")][CLASSES][ADD]["sending"]
-# => "document.querySelector(\".btn\")?.classList.add('sending')"
-```
-
-Three endpoints. No framework.
-
-```python
-GET  *      # serve the shell
-GET  */sse  # push what you see
-POST /do    # verify, eval
-```
-
-## Example
-
-[strophe-todo](https://github.com/tommy-mor/strophe-todo) — a todo list in ~170 lines.
+`pip install strophe`
