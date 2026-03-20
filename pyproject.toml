@@ -1,5 +1,5 @@
 [project]
-name = "strophe"
+name = "evaleval"
 version = "0.2.2"
 description = "Signed snippets, hiccup, and a dual-eval loop. The web that should have been."
 readme = "README.md"
@@ -18,15 +18,15 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/tommy-mor/strophe"
-Repository = "https://github.com/tommy-mor/strophe"
+Homepage = "https://github.com/tommy-mor/evaleval"
+Repository = "https://github.com/tommy-mor/evaleval"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/poem", "src/strophe"]
+packages = ["src/evaleval"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -3,6 +3,6 @@ revision = 3
 requires-python = ">=3.10"
 
 [[package]]
-name = "strophe"
-version = "0.1.0"
+name = "evaleval"
+version = "0.2.2"
 source = { editable = "." }

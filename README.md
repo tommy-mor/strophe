@@ -1,4 +1,6 @@
-# strophe
+# evaleval
+
+`evaleval` is a tiny server-driven web pattern: signed Python expressions in forms, eval on submit, and UI patching over SSE.
 
 The entire client.
 
@@ -23,14 +25,14 @@ GET  /sse    — push what you see
 POST /     — verify, eval
 ```
 
-## Example: [strophe-todo](https://github.com/tommy-mor/strophe-todo)
+## Example: [evaleval-todo](https://github.com/tommy-mor/evaleval-todo)
 
 A todo list in ~170 lines.
 
 Forms are data. They carry their own signed handlers.
 
 ```python
-from strophe import Signer, Three, Two, Selector, MORPH, APPEND, REMOVE
+from evaleval import Signer, Three, Two, Selector, MORPH, APPEND, REMOVE
 
 signer = Signer()
 
@@ -65,7 +67,7 @@ def delete(todo_id):
 The `POST /` route verifies the signature and evals the snippet. `verify_snippet` raises `SnippetExecutionError` with a status code.
 
 ```python
-from strophe import SnippetExecutionError
+from evaleval import SnippetExecutionError
 
 @app.post("/")
 async def do(request):
@@ -90,7 +92,7 @@ If you want side effects plus a return value, use an expression pattern like:
 SSE pushes the initial page as JS the browser evals.
 
 ```python
-from strophe import exec_event, shell_html, One, Eval
+from evaleval import exec_event, shell_html, One, Eval
 
 @app.get("/")
 async def index():
@@ -106,4 +108,4 @@ async def sse(request):
     return StreamingResponse(generate(), media_type="text/event-stream")
 ```
 
-`pip install strophe`
+`pip install evaleval`

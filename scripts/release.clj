@@ -76,6 +76,6 @@
     (println "")
     (println (str "Done. " tag " released."))
     (println "Watch the publish workflow at:")
-    (println "  https://github.com/tommy-mor/strophe/actions")))
+    (println "  https://github.com/tommy-mor/evaleval/actions")))
 
 (apply release *command-line-args*)
