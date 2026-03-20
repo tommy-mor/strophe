@@ -15,6 +15,22 @@ document.addEventListener('submit', async e => {
 });
 ```
 
+The entire server.
+
+```python
+@app.post("/do")
+async def do(request):
+    form = await request.form()
+    snippet, sig, nonce = form['__snippet__'], form['__sig__'], form['__nonce__']
+    if not verify(snippet, nonce, sig):
+        return 403
+    if not consume_nonce(nonce):
+        return 403
+    for key, value in form.items():
+        snippet = snippet.replace(f"${key}", repr(value))
+    return eval(snippet)
+```
+
 Pages are data.
 
 ```python
@@ -52,9 +68,6 @@ Three[Selector("form.go-form")][MORPH][new_form]
 
 Four[Selector(".btn")][CLASSES][ADD]["sending"]
 # => "document.querySelector(\".btn\")?.classList.add('sending')"
-
-One[Eval("document.title = 'hello'")]
-# => "document.title = 'hello'"
 ```
 
 Three endpoints. No framework.
