@@ -1,13 +1,24 @@
-from dataclasses import dataclass
 from enum import Enum, auto
 from itertools import count
-import json
-import re
 
+from evaleval.adt import variant
 from evaleval.hiccup import render
+from evaleval.js_ir import (
+    And,
+    Assign,
+    Call,
+    Const,
+    ExprStmt,
+    Id,
+    If,
+    Member,
+    Program,
+    RawStmt,
+    Str,
+    render_program,
+)
 
 
-_SLOT_PATTERN = re.compile(r"(?<![\w$])\$(?![\w$])")
 _REF_COUNTER = count()
 
 
@@ -20,66 +31,103 @@ class State(Enum):
     DONE = auto()
 
 
-class Action(Enum):
-    MORPH = "morph"
-    PREPEND = "prepend"
-    APPEND = "append"
-    OUTER = "outer"
-    CLASSES = "classes"
-    ADD = "add"
-    TOGGLE = "toggle"
-    REMOVE = "remove"
+class Step:
+    NAME: str | None = None
+
+    @classmethod
+    def error_name(cls) -> str:
+        return cls.NAME or cls.__name__
 
 
-@dataclass(frozen=True)
-class Selector:
+@variant
+class Selector(Step):
     query: str
 
 
-@dataclass(frozen=True)
-class Eval:
+@variant
+class Eval(Step):
     code: str
-    bind_selector: bool = False
 
     @classmethod
-    def on_selected(cls, code: str) -> "Eval":
-        return cls(code=code, bind_selector=True)
+    def on_selected(cls, template: str) -> "EvalOn":
+        return EvalOn(template=template)
 
 
-@dataclass(frozen=True)
-class Hiccup:
+@variant
+class EvalOn(Step):
+    template: str
+
+
+@variant
+class Hiccup(Step):
     data: list | tuple
 
 
-@dataclass(frozen=True)
-class Text:
+@variant
+class Text(Step):
     value: str
 
 
-MORPH = Action.MORPH
-PREPEND = Action.PREPEND
-APPEND = Action.APPEND
-REMOVE = Action.REMOVE
-OUTER = Action.OUTER
-CLASSES = Action.CLASSES
-ADD = Action.ADD
-TOGGLE = Action.TOGGLE
+@variant
+class Morph(Step):
+    NAME = "MORPH"
 
 
-Step = Selector | Eval | Hiccup | Text | Action
+@variant
+class Prepend(Step):
+    NAME = "PREPEND"
 
 
-def _step_name(step: Step) -> str:
-    match step:
-        case Action() as action:
-            return action.name
-        case _:
-            return type(step).__name__
+@variant
+class Append(Step):
+    NAME = "APPEND"
 
 
-def _coerce(item) -> Step:
+@variant
+class Outer(Step):
+    NAME = "OUTER"
+
+
+@variant
+class Classes(Step):
+    NAME = "CLASSES"
+
+
+@variant
+class Add(Step):
+    NAME = "ADD"
+
+
+@variant
+class Toggle(Step):
+    NAME = "TOGGLE"
+
+
+@variant
+class Remove(Step):
+    NAME = "REMOVE"
+
+
+MORPH = Morph()
+PREPEND = Prepend()
+APPEND = Append()
+REMOVE = Remove()
+OUTER = Outer()
+CLASSES = Classes()
+ADD = Add()
+TOGGLE = Toggle()
+
+
+StepType = Selector | Eval | EvalOn | Hiccup | Text | Morph | Prepend | Append | Outer | Classes | Add | Toggle | Remove
+
+
+def _name(step: StepType) -> str:
+    return type(step).error_name()
+
+
+def _coerce(item) -> StepType:
     match item:
-        case Selector() | Eval() | Hiccup() | Text() | Action():
+        case Step():
             return item
         case list() | tuple():
             return Hiccup(item)
@@ -89,24 +137,24 @@ def _coerce(item) -> Step:
             raise TypeError(f"Cannot use {type(item).__name__} in patch chain")
 
 
-def _transition(state: State, step: Step) -> State:
+def _transition(state: State, step: StepType) -> State:
     match state, step:
         case State.START, Selector():
             return State.SELECTED
         case State.START, Eval():
             return State.DONE
 
-        case State.SELECTED, Action.MORPH | Action.PREPEND | Action.APPEND | Action.OUTER:
+        case State.SELECTED, Morph() | Prepend() | Append() | Outer():
             return State.EFFECT
-        case State.SELECTED, Action.CLASSES:
+        case State.SELECTED, Classes():
             return State.CLASS_NAV
-        case State.SELECTED, Action.REMOVE | Eval():
+        case State.SELECTED, Remove() | Eval() | EvalOn():
             return State.DONE
 
         case State.EFFECT, Hiccup() | Text():
             return State.DONE
 
-        case State.CLASS_NAV, Action.ADD | Action.REMOVE | Action.TOGGLE:
+        case State.CLASS_NAV, Add() | Remove() | Toggle():
             return State.CLASS_EFFECT
         case State.CLASS_EFFECT, Text():
             return State.DONE
@@ -114,24 +162,26 @@ def _transition(state: State, step: Step) -> State:
         case State.DONE, _:
             raise ValueError("chain is already complete")
 
-        case State.START, Action.REMOVE:
+        case State.START, Remove():
             raise ValueError("REMOVE requires a Selector before it")
-        case State.START, Action.MORPH | Action.PREPEND | Action.APPEND | Action.OUTER | Action.CLASSES:
-            raise ValueError(f"{_step_name(step)} requires a Selector before it")
-        case State.START, Action.ADD | Action.TOGGLE:
-            raise ValueError(f"{_step_name(step)} requires CLASSES before it")
+        case State.START, Morph() | Prepend() | Append() | Outer() | Classes():
+            raise ValueError(f"{_name(step)} requires a Selector before it")
+        case State.START, Add() | Toggle():
+            raise ValueError(f"{_name(step)} requires CLASSES before it")
+        case State.START, EvalOn():
+            raise ValueError("EvalOn requires a Selector before it")
         case State.START, Hiccup() | Text():
             raise ValueError("Data must follow an action")
-        case State.SELECTED, Action.ADD | Action.TOGGLE:
-            raise ValueError(f"{_step_name(step)} requires CLASSES before it")
+        case State.SELECTED, Add() | Toggle():
+            raise ValueError(f"{_name(step)} requires CLASSES before it")
 
         case _:
-            raise ValueError(f"{_step_name(step)} cannot follow here")
+            raise ValueError(f"{_name(step)} cannot follow here")
 
 
-def _normalize(raw_items) -> tuple[Step, ...]:
+def _normalize(raw_items) -> tuple[StepType, ...]:
     state = State.START
-    steps: list[Step] = []
+    steps: list[StepType] = []
     for item in raw_items:
         step = _coerce(item)
         state = _transition(state, step)
@@ -143,76 +193,88 @@ def _fresh_ref() -> str:
     return f"_{next(_REF_COUNTER)}"
 
 
-def _js_string(value: str) -> str:
-    return json.dumps(value)
+def _selector_expr(query: str) -> Call:
+    return Call(Member(Id("document"), "querySelector"), (Str(query),))
 
 
-def _selector_expr(query: str) -> str:
-    return f"document.querySelector({_js_string(query)})"
-
-
-def _payload_html(step: Step) -> str:
+def _payload_html(step: StepType) -> str:
     match step:
         case Hiccup(data):
             return render(data)
         case Text(value):
             return value
         case _:
-            raise TypeError(f"Expected HTML payload, got {_step_name(step)}")
+            raise TypeError(f"Expected HTML payload, got {_name(step)}")
 
 
-def _bound_eval(code: str, ref: str) -> str:
-    return _SLOT_PATTERN.sub(ref, code)
+def _format_bound_eval(template: str, ref: str) -> str:
+    return template.format(sel=ref)
 
 
-def _compile(steps: tuple[Step, ...]) -> str:
+def _compile(steps: tuple[StepType, ...]) -> Program:
     match steps:
-        case (Eval(code, bind_selector=False),):
-            return code
+        case (Eval(code),):
+            return Program((RawStmt(code),))
 
-        case (Eval(code, bind_selector=True),):
-            return _bound_eval(code, "null")
-
-        case (Selector(query), Eval(code, bind_selector)):
+        case (Selector(query), Eval(code)):
             ref = _fresh_ref()
-            body = _bound_eval(code, ref) if bind_selector else code
-            return f"const {ref} = {_selector_expr(query)};\n{body}"
+            return Program((Const(ref, _selector_expr(query)), RawStmt(code)))
 
-        case (Selector(query), Action.REMOVE):
+        case (Selector(query), EvalOn(template)):
             ref = _fresh_ref()
-            return f"const {ref} = {_selector_expr(query)};\n{ref}?.remove()"
+            body = _format_bound_eval(template, ref)
+            return Program((Const(ref, _selector_expr(query)), RawStmt(body)))
 
-        case (Selector(query), Action.MORPH, Hiccup() | Text() as payload):
+        case (Selector(query), Remove()):
             ref = _fresh_ref()
-            html = _js_string(_payload_html(payload))
-            return f"const {ref} = {_selector_expr(query)};\n{ref} && Idiomorph.morph({ref}, {html})"
+            stmt = ExprStmt(Call(Member(Id(ref), "remove", optional=True)))
+            return Program((Const(ref, _selector_expr(query)), stmt))
 
-        case (Selector(query), Action.PREPEND, Hiccup() | Text() as payload):
+        case (Selector(query), Morph(), Hiccup() | Text() as payload):
             ref = _fresh_ref()
-            html = _js_string(_payload_html(payload))
-            return f"const {ref} = {_selector_expr(query)};\n{ref}?.insertAdjacentHTML(\"afterbegin\", {html})"
+            html = _payload_html(payload)
+            call = Call(Member(Id("Idiomorph"), "morph"), (Id(ref), Str(html)))
+            stmt = ExprStmt(And(Id(ref), call))
+            return Program((Const(ref, _selector_expr(query)), stmt))
 
-        case (Selector(query), Action.APPEND, Hiccup() | Text() as payload):
+        case (Selector(query), Prepend(), Hiccup() | Text() as payload):
             ref = _fresh_ref()
-            html = _js_string(_payload_html(payload))
-            return f"const {ref} = {_selector_expr(query)};\n{ref}?.insertAdjacentHTML(\"beforeend\", {html})"
+            html = _payload_html(payload)
+            call = Call(Member(Id(ref), "insertAdjacentHTML", optional=True), (Str("afterbegin"), Str(html)))
+            stmt = ExprStmt(call)
+            return Program((Const(ref, _selector_expr(query)), stmt))
 
-        case (Selector(query), Action.OUTER, Hiccup() | Text() as payload):
+        case (Selector(query), Append(), Hiccup() | Text() as payload):
             ref = _fresh_ref()
-            html = _js_string(_payload_html(payload))
-            return f"const {ref} = {_selector_expr(query)};\nif ({ref}) {ref}.outerHTML = {html}"
+            html = _payload_html(payload)
+            call = Call(Member(Id(ref), "insertAdjacentHTML", optional=True), (Str("beforeend"), Str(html)))
+            stmt = ExprStmt(call)
+            return Program((Const(ref, _selector_expr(query)), stmt))
 
-        case (Selector(query), Action.CLASSES, Action.ADD, Text(value)):
+        case (Selector(query), Outer(), Hiccup() | Text() as payload):
             ref = _fresh_ref()
-            return f"const {ref} = {_selector_expr(query)};\n{ref}?.classList.add({_js_string(value)})"
+            html = _payload_html(payload)
+            assign = ExprStmt(Assign(Member(Id(ref), "outerHTML"), Str(html)))
+            stmt = If(Id(ref), assign)
+            return Program((Const(ref, _selector_expr(query)), stmt))
 
-        case (Selector(query), Action.CLASSES, Action.REMOVE, Text(value)):
+        case (Selector(query), Classes(), Add(), Text(value)):
             ref = _fresh_ref()
-            return f"const {ref} = {_selector_expr(query)};\n{ref}?.classList.remove({_js_string(value)})"
+            callee = Member(Member(Id(ref), "classList", optional=True), "add")
+            stmt = ExprStmt(Call(callee, (Str(value),)))
+            return Program((Const(ref, _selector_expr(query)), stmt))
 
-        case (Selector(query), Action.CLASSES, Action.TOGGLE, Text(value)):
+        case (Selector(query), Classes(), Remove(), Text(value)):
             ref = _fresh_ref()
-            return f"const {ref} = {_selector_expr(query)};\n{ref}?.classList.toggle({_js_string(value)})"
+            callee = Member(Member(Id(ref), "classList", optional=True), "remove")
+            stmt = ExprStmt(Call(callee, (Str(value),)))
+            return Program((Const(ref, _selector_expr(query)), stmt))
+
+        case (Selector(query), Classes(), Toggle(), Text(value)):
+            ref = _fresh_ref()
+            callee = Member(Member(Id(ref), "classList", optional=True), "toggle")
+            stmt = ExprStmt(Call(callee, (Str(value),)))
+            return Program((Const(ref, _selector_expr(query)), stmt))
 
         case _:
             raise ValueError(f"Unsupported patch chain: {steps!r}")
@@ -227,11 +289,11 @@ class DepthChain:
         items = self.items + (item,)
         steps = _normalize(items)
         if len(items) >= self.depth:
-            return _compile(steps)
+            return render_program(_compile(steps))
         return DepthChain(self.depth, items)
 
     def __str__(self):
-        return _compile(_normalize(self.items))
+        return render_program(_compile(_normalize(self.items)))
 
 
 One   = DepthChain(1)

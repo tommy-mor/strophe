@@ -7,6 +7,7 @@ from evaleval.patch import (
     APPEND,
     CLASSES,
     Eval,
+    EvalOn,
     Four,
     MORPH,
     OUTER,
@@ -73,7 +74,7 @@ def test_eval_direct_code_passthrough():
 
 
 def test_eval_arrow_substitutes_selector_var():
-    js = Two[Selector("#root")][Eval.on_selected("$.focus()")]
+    js = Two[Selector("#root")][EvalOn("{sel}.focus()")]
     assert_bound_ref(
         js,
         'document.querySelector("#root")',
@@ -81,9 +82,9 @@ def test_eval_arrow_substitutes_selector_var():
     )
 
 
-def test_eval_arrow_without_selector_substitutes_null():
-    js = One[Eval.on_selected("console.log($)")]
-    assert js == "console.log(null)"
+def test_eval_on_requires_selector():
+    with pytest.raises(ValueError, match="EvalOn requires a Selector before it"):
+        _ = One[EvalOn("console.log({sel})")]
 
 
 def test_classes_add_remove_toggle_emit_expected_js():
@@ -132,7 +133,7 @@ def test_append_prepend_outer_emit_expected_js():
 
 def test_eval_must_be_last():
     with pytest.raises(ValueError, match="chain is already complete"):
-        _ = Three[Selector("#root")][Eval.on_selected("$.focus()")][APPEND]
+        _ = Three[Selector("#root")][EvalOn("{sel}.focus()")][APPEND]
 
 
 def test_class_name_escaping_uses_template_literal_js():
