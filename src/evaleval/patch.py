@@ -1,6 +1,7 @@
 from enum import Enum, auto
 from itertools import count
 from dataclasses import dataclass
+import re
 
 from evaleval.hiccup import render
 from evaleval.js_ir import (
@@ -20,6 +21,7 @@ from evaleval.js_ir import (
 
 
 _REF_COUNTER = count()
+_SLOT_PATTERN = re.compile(r"(?<![\w$])\$(?![\w$])")
 
 
 class State(Enum):
@@ -51,7 +53,7 @@ class Eval(Step):
 
 @dataclass(frozen=True, slots=True)
 class EvalOn(Step):
-    template: str
+    code: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,8 +205,10 @@ def _payload_html(step: StepType) -> str:
             raise TypeError(f"Expected HTML payload, got {_name(step)}")
 
 
-def _format_bound_eval(template: str, ref: str) -> str:
-    return template.format(sel=ref)
+def _lower_eval_on(code: str, ref: str) -> str:
+    if not code.startswith("=>"):
+        raise ValueError("EvalOn code must start with '=>'")
+    return _SLOT_PATTERN.sub(ref, code[2:].strip())
 
 
 def _compile(steps: tuple[StepType, ...]) -> Program:
@@ -216,9 +220,9 @@ def _compile(steps: tuple[StepType, ...]) -> Program:
             ref = _fresh_ref()
             return Program((Const(ref, _selector_expr(query)), RawStmt(code)))
 
-        case (Selector(query), EvalOn(template)):
+        case (Selector(query), EvalOn(code)):
             ref = _fresh_ref()
-            body = _format_bound_eval(template, ref)
+            body = _lower_eval_on(code, ref)
             return Program((Const(ref, _selector_expr(query)), RawStmt(body)))
 
         case (Selector(query), Remove()):

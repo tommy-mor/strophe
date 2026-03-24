@@ -11,6 +11,7 @@ from evaleval.signing import (
     apply_snippet_substitutions,
 )
 from evaleval.sse import exec_event, shell_html
+from evaleval.store import event, JsonlStore, to_dict, from_dict
 
 __all__ = [
     # hiccup
@@ -23,4 +24,6 @@ __all__ = [
     "Signer", "SnippetExecutionError", "scrub", "apply_snippet_substitutions",
     # sse
     "exec_event", "shell_html",
+    # store
+    "event", "JsonlStore", "to_dict", "from_dict",
 ]

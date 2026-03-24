@@ -74,7 +74,7 @@ def test_eval_direct_code_passthrough():
 
 
 def test_eval_arrow_substitutes_selector_var():
-    js = Two[Selector("#root")][EvalOn("{sel}.focus()")]
+    js = Two[Selector("#root")][EvalOn("=> $.focus()")]
     assert_bound_ref(
         js,
         'document.querySelector("#root")',
@@ -84,7 +84,12 @@ def test_eval_arrow_substitutes_selector_var():
 
 def test_eval_on_requires_selector():
     with pytest.raises(ValueError, match="EvalOn requires a Selector before it"):
-        _ = One[EvalOn("console.log({sel})")]
+        _ = One[EvalOn("=> console.log($)")]
+
+
+def test_eval_on_requires_arrow_prefix():
+    with pytest.raises(ValueError, match="EvalOn code must start with '=>'"):
+        _ = Two[Selector("#root")][EvalOn("$.focus()")]
 
 
 def test_classes_add_remove_toggle_emit_expected_js():
@@ -133,7 +138,7 @@ def test_append_prepend_outer_emit_expected_js():
 
 def test_eval_must_be_last():
     with pytest.raises(ValueError, match="chain is already complete"):
-        _ = Three[Selector("#root")][EvalOn("{sel}.focus()")][APPEND]
+        _ = Three[Selector("#root")][EvalOn("=> $.focus()")][APPEND]
 
 
 def test_class_name_escaping_uses_template_literal_js():
