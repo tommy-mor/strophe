@@ -25,13 +25,21 @@ Usage:
         return Deposited(...)
 
     result = await store.atomic(maybe_emit)
+
+    # migrate: transform raw dicts before deserialization (for schema evolution)
+    def migrate(d):
+        if d.get("type") == "old_name":
+            d["type"] = "new_name"
+        return d
+
+    store = JsonlStore("/data/ledger.jsonl", migrate=migrate)
 """
 
 import asyncio
 import json
 import pathlib
 from dataclasses import dataclass, asdict, fields
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 _registry: dict[str, type] = {}
 
@@ -64,11 +72,14 @@ class JsonlStore:
     - atomic(fn): fn receives the current event list and returns an event or None.
       The read + fn + optional write happen under the lock, so fn sees a consistent
       snapshot and no other writer can interleave. fn must be synchronous.
+    - migrate: optional callable applied to each raw dict during replay, before
+      deserialization. Use for schema evolution (type renames, field renames, etc.).
     """
 
-    def __init__(self, path: pathlib.Path | str):
+    def __init__(self, path: pathlib.Path | str, migrate: Optional[Callable[[dict], dict]] = None):
         self.path = pathlib.Path(path)
         self._lock = asyncio.Lock()
+        self._migrate = migrate
         self._events: list = []
         self._replay()
 
@@ -78,7 +89,10 @@ class JsonlStore:
         with open(self.path) as f:
             for line in f:
                 if line.strip():
-                    e = from_dict(json.loads(line))
+                    d = json.loads(line)
+                    if self._migrate:
+                        d = self._migrate(d)
+                    e = from_dict(d)
                     if e is not None:
                         self._events.append(e)
 
@@ -86,6 +100,12 @@ class JsonlStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a") as f:
             f.write(json.dumps(to_dict(e), default=str) + "\n")
+
+    def write_sync(self, e: Any) -> None:
+        """Sync write — only safe when no concurrent coroutines hold a reference to this store.
+        Intended for initialization before an event loop is running."""
+        self._write_sync(e)
+        self._events.append(e)
 
     def read(self) -> list:
         """Return a snapshot of all events. In-memory — no I/O."""
