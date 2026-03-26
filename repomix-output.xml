@@ -1,0 +1,1422 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.github/
+  workflows/
+    publish.yml
+scripts/
+  release.clj
+src/
+  evaleval/
+    __init__.py
+    hiccup.py
+    js_ir.py
+    patch.py
+    signing.py
+    sse.py
+tests/
+  conftest.py
+  test_hiccup.py
+  test_patch.py
+  test_signing.py
+  test_sse.py
+.gitignore
+pyproject.toml
+README.md
+TEST.sh
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".github/workflows/publish.yml">
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Build
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+</file>
+
+<file path="src/evaleval/hiccup.py">
+from html import escape
+
+
+VOID_ELEMENTS = {
+    'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+    'link', 'meta', 'param', 'source', 'track', 'wbr'
+}
+
+
+class RawContent:
+    """Wrapper for content that should not be HTML-escaped.
+    Use with caution - only for trusted content like inline scripts/styles."""
+    def __init__(self, content):
+        self.content = content
+
+
+def parse_tag(tag_str):
+    """Parse 'div.class1.class2#id' into tag, id, classes."""
+    parts = tag_str.split('#')
+    tag_and_classes = parts[0]
+    id_val = parts[1].split('.')[0] if len(parts) > 1 else None
+
+    class_parts = tag_and_classes.split('.')
+    tag = class_parts[0] or 'div'
+    classes = class_parts[1:] + (parts[1].split('.')[1:] if len(parts) > 1 else [])
+
+    return tag, id_val, classes
+
+
+def render_attrs(attrs, id_val, classes):
+    """Render HTML attributes."""
+    parts = []
+
+    if id_val:
+        parts.append(f'id="{escape(id_val)}"')
+    elif 'id' in attrs:
+        parts.append(f'id="{escape(str(attrs["id"]))}"')
+
+    all_classes = classes[:]
+    if 'class' in attrs:
+        all_classes.append(attrs['class'])
+    if all_classes:
+        parts.append(f'class="{escape(" ".join(all_classes))}"')
+
+    for key, val in attrs.items():
+        if key not in ('id', 'class'):
+            parts.append(f'{escape(key)}="{escape(str(val))}"')
+
+    return ' ' + ' '.join(parts) if parts else ''
+
+
+def render(data, parent_tag=None):
+    """Render hiccup data structure to HTML string."""
+    if isinstance(data, RawContent):
+        return data.content
+
+    if isinstance(data, str):
+        return escape(data)
+
+    if not isinstance(data, (list, tuple)):
+        return ''
+
+    if len(data) == 0:
+        return ''
+
+    tag_str = data[0]
+
+    if not isinstance(tag_str, str):
+        return ''
+
+    tag, id_val, classes = parse_tag(tag_str)
+
+    attrs = {}
+    children_start = 1
+
+    if len(data) > 1 and isinstance(data[1], dict):
+        attrs = data[1]
+        children_start = 2
+
+    children = data[children_start:]
+
+    flattened = []
+    for child in children:
+        if isinstance(child, list) and len(child) > 0 and isinstance(child[0], list):
+            flattened.extend(child)
+        else:
+            flattened.append(child)
+
+    children_html = ''.join(render(child, tag) for child in flattened)
+
+    attrs_str = render_attrs(attrs, id_val, classes)
+
+    if tag in VOID_ELEMENTS:
+        return f'<{tag}{attrs_str} />'
+    else:
+        return f'<{tag}{attrs_str}>{children_html}</{tag}>'
+</file>
+
+<file path="src/evaleval/signing.py">
+import hashlib
+import hmac
+import uuid
+import time
+import base64
+from collections.abc import Mapping
+from typing import Any
+
+def scrub(value: str) -> str:
+    """Escape a form value so it can't break out of an eval context."""
+    return repr(value)
+
+
+def apply_snippet_substitutions(snippet: str, form_data: dict[str, str]) -> str:
+    """Replace $key placeholders; longest keys first so $idx is not broken by $id."""
+    for key, value in sorted(form_data.items(), key=lambda x: len(x[0]), reverse=True):
+        snippet = snippet.replace(f"${key}", scrub(value))
+    return snippet
+
+
+class Signer:
+    """HMAC-SHA256 snippet signing with one-time nonces.
+
+    Usage:
+        signer = Signer()
+
+        # At render time — embed in the form
+        code = "go('whale', $message)"
+        hidden_fields = signer.snippet_hidden(code)
+
+        # At /do time — verify and consume
+        if not signer.verify(snippet, nonce, sig):
+            return 403
+        if not signer.consume_nonce(nonce):
+            return 403
+    """
+
+    def __init__(self, secret: bytes | None = None, nonce_ttl: int = 3600):
+        self.secret = secret or hashlib.sha256(f"snippets-{uuid.uuid4()}".encode()).digest()
+        self.nonce_ttl = nonce_ttl
+        self._nonces: dict[str, float] = {}
+        self._last_nonce_clean: float = 0.0
+
+    def _clean_nonces(self):
+        now = time.time()
+        if now - self._last_nonce_clean < 60:
+            return
+        self._last_nonce_clean = now
+        for n in [n for n, exp in self._nonces.items() if exp < now]:
+            del self._nonces[n]
+
+    def generate_nonce(self) -> str:
+        self._clean_nonces()
+        nonce = uuid.uuid4().hex
+        self._nonces[nonce] = time.time() + self.nonce_ttl
+        return nonce
+
+    def consume_nonce(self, nonce: str) -> bool:
+        self._clean_nonces()
+        if nonce in self._nonces:
+            del self._nonces[nonce]
+            return True
+        return False
+
+    def sign(self, code: str, nonce: str) -> str:
+        msg = f"{code}|{nonce}".encode()
+        return base64.urlsafe_b64encode(
+            hmac.new(self.secret, msg, hashlib.sha256).digest()
+        ).decode()
+
+    def verify(self, code: str, nonce: str, sig: str) -> bool:
+        return hmac.compare_digest(self.sign(code, nonce), sig)
+
+    def snippet_hidden(self, code: str) -> list:
+        """Generate hiccup hidden input fields for a signed snippet."""
+        nonce = self.generate_nonce()
+        sig = self.sign(code, nonce)
+        return [
+            ["input", {"type": "hidden", "name": "__snippet__", "value": code}],
+            ["input", {"type": "hidden", "name": "__sig__", "value": sig}],
+            ["input", {"type": "hidden", "name": "__nonce__", "value": nonce}],
+        ]
+
+    def verify_snippet(self, form: Mapping[str, Any]) -> str:
+        """Verify signed form payload and return substituted snippet."""
+        snippet = str(form.get("__snippet__", ""))
+        sig = str(form.get("__sig__", ""))
+        nonce = str(form.get("__nonce__", ""))
+
+        if not all([snippet, sig, nonce]):
+            raise SnippetExecutionError("Missing fields", status_code=400)
+        if not self.verify(snippet, nonce, sig):
+            raise SnippetExecutionError("Invalid signature", status_code=403)
+        if not self.consume_nonce(nonce):
+            raise SnippetExecutionError("Invalid nonce", status_code=403)
+
+        form_data = {k: str(v) for k, v in form.items() if not k.startswith("__")}
+        return apply_snippet_substitutions(snippet, form_data)
+
+
+class SnippetExecutionError(Exception):
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+</file>
+
+<file path="tests/conftest.py">
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+</file>
+
+<file path="tests/test_hiccup.py">
+from evaleval.hiccup import RawContent, parse_tag, render, render_attrs
+
+
+def test_parse_tag_extracts_tag_id_classes():
+    tag, ident, classes = parse_tag("button.primary.large#save")
+    assert tag == "button"
+    assert ident == "save"
+    assert classes == ["primary", "large"]
+
+
+def test_parse_tag_defaults_to_div_when_empty_tag():
+    tag, ident, classes = parse_tag(".a.b#x")
+    assert tag == "div"
+    assert ident == "x"
+    assert classes == ["a", "b"]
+
+
+def test_render_attrs_merges_and_escapes():
+    attrs = render_attrs(
+        {"class": "external", "data-k": 'a"b', "id": "ignored"},
+        id_val="real-id",
+        classes=["one", "two"],
+    )
+    assert attrs == ' id="real-id" class="one two external" data-k="a&quot;b"'
+
+
+def test_render_handles_rawcontent_without_escape():
+    assert render(RawContent("<b>safe</b>")) == "<b>safe</b>"
+
+
+def test_render_escapes_text_nodes():
+    assert render(["p", "<unsafe>"]) == "<p>&lt;unsafe&gt;</p>"
+
+
+def test_render_void_element_self_closes():
+    assert render(["input", {"type": "text", "value": "x"}]) == '<input type="text" value="x" />'
+
+
+def test_render_flattens_nested_children_lists():
+    data = ["ul", [["li", "a"], ["li", "b"]]]
+    assert render(data) == "<ul><li>a</li><li>b</li></ul>"
+
+
+def test_render_returns_empty_for_invalid_values():
+    assert render(123) == ""
+    assert render([]) == ""
+    assert render([42, "x"]) == ""
+</file>
+
+<file path="tests/test_signing.py">
+import pytest
+
+from evaleval.signing import (
+    Signer,
+    SnippetExecutionError,
+    apply_snippet_substitutions,
+    scrub,
+)
+
+
+def test_scrub_uses_python_repr():
+    assert scrub('a"b') == '\'a"b\''
+
+
+def test_substitutions_replace_longest_keys_first():
+    snippet = "go($id, $idx)"
+    out = apply_snippet_substitutions(snippet, {"id": "A", "idx": "B"})
+    assert out == "go('A', 'B')"
+
+
+def test_sign_and_verify_roundtrip():
+    signer = Signer(secret=b"secret", nonce_ttl=60)
+    nonce = signer.generate_nonce()
+    sig = signer.sign("add($text)", nonce)
+    assert signer.verify("add($text)", nonce, sig) is True
+    assert signer.verify("add($text) ", nonce, sig) is False
+
+
+def test_verify_snippet_rejects_missing_fields():
+    signer = Signer(secret=b"secret")
+    with pytest.raises(SnippetExecutionError, match="Missing fields") as exc:
+        signer.verify_snippet({})
+    assert exc.value.status_code == 400
+
+
+def test_verify_snippet_rejects_bad_signature():
+    signer = Signer(secret=b"secret")
+    nonce = signer.generate_nonce()
+    with pytest.raises(SnippetExecutionError, match="Invalid signature") as exc:
+        signer.verify_snippet(
+            {
+                "__snippet__": "add($text)",
+                "__sig__": "bad",
+                "__nonce__": nonce,
+                "text": "x",
+            }
+        )
+    assert exc.value.status_code == 403
+
+
+def test_verify_snippet_consumes_nonce_and_substitutes_form_data():
+    signer = Signer(secret=b"secret")
+    snippet = "add($text)"
+    nonce = signer.generate_nonce()
+    sig = signer.sign(snippet, nonce)
+
+    out = signer.verify_snippet(
+        {"__snippet__": snippet, "__sig__": sig, "__nonce__": nonce, "text": "todo"}
+    )
+    assert out == "add('todo')"
+
+    with pytest.raises(SnippetExecutionError, match="Invalid nonce"):
+        signer.verify_snippet(
+            {"__snippet__": snippet, "__sig__": sig, "__nonce__": nonce, "text": "todo"}
+        )
+</file>
+
+<file path=".gitignore">
+__pycache__/
+.venv/
+</file>
+
+<file path="scripts/release.clj">
+(ns scripts.release
+  (:require [babashka.process :as p]
+            [clojure.string :as str]))
+
+(defn bump-version [version bump-type]
+  (let [[major minor patch] (map #(Integer/parseInt %) (str/split version #"\."))
+        [new-major new-minor new-patch]
+        (case bump-type
+          "major" [(inc major) 0 0]
+          "minor" [major (inc minor) 0]
+          "patch" [major minor (inc patch)]
+          [major minor (inc patch)])]
+    (str new-major "." new-minor "." new-patch)))
+
+(defn update-pyproject-version [version]
+  (let [path "pyproject.toml"
+        content (slurp path)
+        updated (str/replace content
+                             #"(?m)^version\s*=\s*\"[^\"]*\""
+                             (str "version = \"" version "\""))]
+    (spit path updated)))
+
+(defn release [& args]
+  (let [bump-type-or-version (first args)
+        explicit-version (when (and bump-type-or-version
+                                    (re-matches #"^\d+\.\d+\.\d+$" bump-type-or-version))
+                           bump-type-or-version)
+        bump-type (if explicit-version "patch" (or bump-type-or-version "patch"))
+
+        latest-tag (-> (p/process ["git" "tag" "--sort=-version:refname"] {:out :string})
+                       deref
+                       :out
+                       str/trim
+                       (str/split-lines)
+                       first
+                       (or ""))
+        latest-version (if (empty? latest-tag)
+                         "0.0.0"
+                         (str/replace latest-tag #"^v" ""))
+
+        version (if explicit-version
+                  (str/replace explicit-version #"^v" "")
+                  (bump-version latest-version bump-type))
+        tag (str "v" version)]
+
+    ;; Check for clean working tree
+    (let [result @(p/process ["git" "diff" "--quiet"] {:continue true})]
+      (when (not= 0 (:exit result))
+        (println "error: working tree has uncommitted changes — commit or stash first")
+        (System/exit 1)))
+    (let [result @(p/process ["git" "diff" "--cached" "--quiet"] {:continue true})]
+      (when (not= 0 (:exit result))
+        (println "error: working tree has staged uncommitted changes — commit or stash first")
+        (System/exit 1)))
+
+    (when (not explicit-version)
+      (println (str "Latest version: " latest-version))
+      (println (str "Bumping " bump-type " version to: " version)))
+
+    ;; Update version in pyproject.toml, commit, tag, push
+    (update-pyproject-version version)
+    @(p/process ["git" "add" "pyproject.toml"] {:inherit true})
+    @(p/process ["git" "commit" "-m" (str "Release " tag)] {:inherit true})
+
+    (println (str "Tagging " tag " and pushing to origin..."))
+    @(p/process ["git" "tag" "-a" tag "-m" (str "Release " tag)] {:inherit true})
+    @(p/process ["git" "push" "origin" "main" tag] {:inherit true})
+
+    ;; Create GitHub release (triggers the publish workflow)
+    (println (str "Creating GitHub release " tag "..."))
+    @(p/process ["gh" "release" "create" tag
+                 "--title" tag
+                 "--notes" (str "Release " tag)]
+                {:inherit true})
+
+    (println "")
+    (println (str "Done. " tag " released."))
+    (println "Watch the publish workflow at:")
+    (println "  https://github.com/tommy-mor/evaleval/actions")))
+
+(apply release *command-line-args*)
+</file>
+
+<file path="src/evaleval/js_ir.py">
+import json
+from dataclasses import dataclass
+
+
+class Expr:
+    pass
+
+
+class Stmt:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class Id(Expr):
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class Str(Expr):
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class RawExpr(Expr):
+    code: str
+
+
+@dataclass(frozen=True, slots=True)
+class Member(Expr):
+    obj: Expr
+    prop: str
+    optional: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class Call(Expr):
+    callee: Expr
+    args: tuple[Expr, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Assign(Expr):
+    left: Expr
+    right: Expr
+
+
+@dataclass(frozen=True, slots=True)
+class And(Expr):
+    left: Expr
+    right: Expr
+
+
+@dataclass(frozen=True, slots=True)
+class Const(Stmt):
+    name: str
+    value: Expr
+
+
+@dataclass(frozen=True, slots=True)
+class ExprStmt(Stmt):
+    expr: Expr
+
+
+@dataclass(frozen=True, slots=True)
+class If(Stmt):
+    condition: Expr
+    then: Stmt
+
+
+@dataclass(frozen=True, slots=True)
+class RawStmt(Stmt):
+    code: str
+
+
+@dataclass(frozen=True, slots=True)
+class Program:
+    statements: tuple[Stmt, ...]
+
+
+def render_expr(expr: Expr) -> str:
+    match expr:
+        case Id(name):
+            return name
+        case Str(value):
+            return json.dumps(value)
+        case RawExpr(code):
+            return code
+        case Member(obj, prop, optional):
+            op = "?." if optional else "."
+            return f"{render_expr(obj)}{op}{prop}"
+        case Call(callee, args):
+            args_js = ", ".join(render_expr(arg) for arg in args)
+            return f"{render_expr(callee)}({args_js})"
+        case Assign(left, right):
+            return f"{render_expr(left)} = {render_expr(right)}"
+        case And(left, right):
+            return f"{render_expr(left)} && {render_expr(right)}"
+        case _:
+            raise TypeError(f"Unsupported expression: {expr!r}")
+
+
+def render_stmt(stmt: Stmt) -> str:
+    match stmt:
+        case Const(name, value):
+            return f"const {name} = {render_expr(value)};"
+        case ExprStmt(expr):
+            return render_expr(expr)
+        case If(condition, then):
+            return f"if ({render_expr(condition)}) {render_stmt(then)}"
+        case RawStmt(code):
+            return code
+        case _:
+            raise TypeError(f"Unsupported statement: {stmt!r}")
+
+
+def render_program(program: Program) -> str:
+    return "\n".join(render_stmt(stmt) for stmt in program.statements)
+</file>
+
+<file path="src/evaleval/sse.py">
+"""SSE helpers for the dual-eval loop."""
+
+
+def exec_event(js: str | list[str] | tuple[str, ...]) -> str:
+    """Wrap JavaScript code as an SSE 'exec' event."""
+    if isinstance(js, (list, tuple)):
+        js = ";".join(js)
+    lines = ["event: exec"]
+    for line in js.split('\n'):
+        lines.append(f"data: {line}")
+    lines += ["", ""]
+    return "\n".join(lines)
+
+
+SHELL_HTML_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body>
+<!--
+Keep app content inside a stable mount node.
+If server patches morph <body> itself, this script tag can be replaced, which restarts the
+EventSource connection and can duplicate repeated auth/login paints.
+-->
+<div id="app"></div>
+<script type="module">
+import { Idiomorph } from '__IDIOMORPH_URL__';
+window.Idiomorph = Idiomorph;
+const es = new EventSource(__SSE_PATH__);
+es.addEventListener('exec', e => {
+  eval(e.data);
+});
+document.addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    const r = await fetch(f.action, { method: 'POST', body: new FormData(f) });
+    const t = await r.text();
+    if (t) eval(t);
+  } catch (err) {
+    console.error(err);
+  }
+  if (f.dataset.reset !== 'false') f.reset();
+});
+</script>
+</body>
+</html>"""
+
+
+def shell_html(sse_path: str | None = None, idiomorph_url: str | None = None) -> str:
+    """Generate the shell HTML with optional custom SSE path and Idiomorph URL."""
+    idi = idiomorph_url or "https://unpkg.com/idiomorph@0.3.0/dist/idiomorph.esm.js"
+    sse = f"'{sse_path}'" if sse_path else "'/sse'"
+    return (
+        SHELL_HTML_TEMPLATE
+        .replace("__IDIOMORPH_URL__", idi)
+        .replace("__SSE_PATH__", sse)
+    )
+</file>
+
+<file path="tests/test_sse.py">
+from evaleval.sse import exec_event, shell_html
+
+
+def test_exec_event_wraps_single_string():
+    out = exec_event("console.log('x')")
+    assert out == "event: exec\ndata: console.log('x')\n\n"
+
+
+def test_exec_event_joins_multiple_statements():
+    out = exec_event(["a()", "b()"])
+    assert out == "event: exec\ndata: a();b()\n\n"
+
+
+def test_shell_html_defaults_include_fixed_sse_path():
+    html = shell_html()
+    assert "https://unpkg.com/idiomorph@0.3.0/dist/idiomorph.esm.js" in html
+    assert "new EventSource('/sse')" in html
+    assert '<div id="app"></div>' in html
+    assert "__IDIOMORPH_URL__" not in html
+    assert "__SSE_PATH__" not in html
+
+
+def test_shell_html_applies_custom_sse_and_idiomorph():
+    html = shell_html(sse_path="/custom/sse", idiomorph_url="https://cdn.example/idiomorph.js")
+    assert "import { Idiomorph } from 'https://cdn.example/idiomorph.js';" in html
+    assert "new EventSource('/custom/sse')" in html
+</file>
+
+<file path="TEST.sh">
+#!/usr/bin/env bb
+
+(require '[babashka.fs :as fs]
+         '[babashka.process :as p])
+
+(let [script-dir (str (fs/canonicalize (fs/parent *file*)))
+      existing-py (System/getenv "PYTHONPATH")
+      local-src (str script-dir "/src")
+      py-path (if (seq existing-py) (str local-src ":" existing-py) local-src)
+      cmd (into ["uv" "run" "pytest"] *command-line-args*)
+      proc (p/process cmd {:inherit true
+                           :extra-env {"PYTHONPATH" py-path}})
+      exit-code (.waitFor (:proc proc))]
+  (System/exit exit-code))
+</file>
+
+<file path="src/evaleval/__init__.py">
+from evaleval.hiccup import render, RawContent, parse_tag
+from evaleval.patch import (
+    Selector, Eval, EvalOn,
+    MORPH, PREPEND, APPEND, REMOVE, OUTER, CLASSES, ADD, TOGGLE,
+    DepthChain, One, Two, Three, Four, Five, Six, Seven, Eight, Nine, Ten,
+)
+from evaleval.signing import (
+    Signer,
+    SnippetExecutionError,
+    scrub,
+    apply_snippet_substitutions,
+)
+from evaleval.sse import exec_event, shell_html
+
+__all__ = [
+    # hiccup
+    "render", "RawContent", "parse_tag",
+    # patch
+    "Selector", "Eval", "EvalOn",
+    "MORPH", "PREPEND", "APPEND", "REMOVE", "OUTER", "CLASSES", "ADD", "TOGGLE",
+    "DepthChain", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+    # signing
+    "Signer", "SnippetExecutionError", "scrub", "apply_snippet_substitutions",
+    # sse
+    "exec_event", "shell_html",
+]
+</file>
+
+<file path="tests/test_patch.py">
+import re
+
+import pytest
+
+from evaleval.patch import (
+    ADD,
+    APPEND,
+    CLASSES,
+    Eval,
+    EvalOn,
+    Four,
+    MORPH,
+    OUTER,
+    PREPEND,
+    REMOVE,
+    Selector,
+    TOGGLE,
+    Two,
+    Three,
+    One,
+)
+
+
+def assert_bound_ref(js, selector_expr, body_template):
+    first, second = js.split("\n")
+    match = re.fullmatch(r"const (_\d+) = (.+)", first)
+    assert match is not None
+    ref = match.group(1)
+    assert match.group(2).removesuffix(";") == selector_expr
+    assert second == body_template.format(ref=ref)
+
+
+def test_selector_must_precede_actions():
+    with pytest.raises(ValueError, match="REMOVE requires a Selector"):
+        _ = One[REMOVE]
+
+
+def test_action_requires_selector():
+    with pytest.raises(ValueError, match="MORPH requires a Selector"):
+        _ = Two[MORPH][["div"]]
+
+
+def test_add_requires_classes_first():
+    with pytest.raises(ValueError, match="ADD requires CLASSES before it"):
+        _ = Three[Selector("#x")][ADD]["active"]
+
+
+def test_data_must_be_last():
+    with pytest.raises(ValueError, match="chain is already complete"):
+        _ = Four[Selector("#x")][MORPH][["div"]][APPEND]
+
+
+def test_morph_chain_renders_js():
+    js = Three[Selector("#app")][MORPH][["div#app", "hello"]]
+    assert_bound_ref(
+        js,
+        'document.querySelector("#app")',
+        '{ref} && Idiomorph.morph({ref}, "<div id=\\"app\\">hello</div>")',
+    )
+
+
+def test_selector_escaping_for_quotes_and_backslashes():
+    js = Two[Selector('#a"b\\c')][REMOVE]
+    assert_bound_ref(
+        js,
+        'document.querySelector("#a\\"b\\\\c")',
+        "{ref}?.remove()",
+    )
+
+
+def test_eval_direct_code_passthrough():
+    js = One[Eval("console.log('ok')")]
+    assert js == "console.log('ok')"
+
+
+def test_eval_arrow_substitutes_selector_var():
+    js = Two[Selector("#root")][EvalOn("=> $.focus()")]
+    assert_bound_ref(
+        js,
+        'document.querySelector("#root")',
+        "{ref}.focus()",
+    )
+
+
+def test_eval_on_requires_selector():
+    with pytest.raises(ValueError, match="EvalOn requires a Selector before it"):
+        _ = One[EvalOn("=> console.log($)")]
+
+
+def test_eval_on_requires_arrow_prefix():
+    with pytest.raises(ValueError, match="EvalOn code must start with '=>'"):
+        _ = Two[Selector("#root")][EvalOn("$.focus()")]
+
+
+def test_classes_add_remove_toggle_emit_expected_js():
+    add_js = Four[Selector("#item")][CLASSES][ADD]["on"]
+    rem_js = Four[Selector("#item")][CLASSES][REMOVE]["on"]
+    tog_js = Four[Selector("#item")][CLASSES][TOGGLE]["on"]
+
+    assert_bound_ref(
+        add_js,
+        'document.querySelector("#item")',
+        '{ref}?.classList.add("on")',
+    )
+    assert_bound_ref(
+        rem_js,
+        'document.querySelector("#item")',
+        '{ref}?.classList.remove("on")',
+    )
+    assert_bound_ref(
+        tog_js,
+        'document.querySelector("#item")',
+        '{ref}?.classList.toggle("on")',
+    )
+
+
+def test_append_prepend_outer_emit_expected_js():
+    append_js  = Three[Selector("#list")][APPEND][["li", "x"]]
+    prepend_js = Three[Selector("#list")][PREPEND][["li", "x"]]
+    outer_js   = Three[Selector("#list")][OUTER][["ul#list", ["li", "x"]]]
+
+    assert_bound_ref(
+        append_js,
+        'document.querySelector("#list")',
+        '{ref}?.insertAdjacentHTML("beforeend", "<li>x</li>")',
+    )
+    assert_bound_ref(
+        prepend_js,
+        'document.querySelector("#list")',
+        '{ref}?.insertAdjacentHTML("afterbegin", "<li>x</li>")',
+    )
+    assert_bound_ref(
+        outer_js,
+        'document.querySelector("#list")',
+        'if ({ref}) {ref}.outerHTML = "<ul id=\\"list\\"><li>x</li></ul>"',
+    )
+
+
+def test_eval_must_be_last():
+    with pytest.raises(ValueError, match="chain is already complete"):
+        _ = Three[Selector("#root")][EvalOn("=> $.focus()")][APPEND]
+
+
+def test_class_name_escaping_uses_template_literal_js():
+    js = Four[Selector("#item")][CLASSES][ADD]["it's\\ok"]
+    assert_bound_ref(
+        js,
+        'document.querySelector("#item")',
+        '{ref}?.classList.add("it\'s\\\\ok")',
+    )
+
+
+def test_selector_refs_are_globally_unique():
+    first = Two[Selector("#a")][REMOVE]
+    second = Two[Selector("#b")][REMOVE]
+
+    first_match = re.match(r"const (_\d+) =", first)
+    second_match = re.match(r"const (_\d+) =", second)
+
+    assert first_match is not None
+    assert second_match is not None
+    assert int(second_match.group(1)[1:]) == int(first_match.group(1)[1:]) + 1
+
+
+def test_selector_escaping_handles_newlines():
+    js = Two[Selector("a\nb")][REMOVE]
+    assert_bound_ref(
+        js,
+        'document.querySelector("a\\nb")',
+        "{ref}?.remove()",
+    )
+</file>
+
+<file path="src/evaleval/patch.py">
+from enum import Enum, auto
+from itertools import count
+from dataclasses import dataclass
+import re
+
+from evaleval.hiccup import render
+from evaleval.js_ir import (
+    And,
+    Assign,
+    Call,
+    Const,
+    ExprStmt,
+    Id,
+    If,
+    Member,
+    Program,
+    RawStmt,
+    Str,
+    render_program,
+)
+
+
+_REF_COUNTER = count()
+_SLOT_PATTERN = re.compile(r"(?<![\w$])\$(?![\w$])")
+
+
+class State(Enum):
+    START = auto()
+    SELECTED = auto()
+    EFFECT = auto()
+    CLASS_NAV = auto()
+    CLASS_EFFECT = auto()
+    DONE = auto()
+
+
+class Step:
+    NAME: str | None = None
+
+    @classmethod
+    def error_name(cls) -> str:
+        return cls.NAME or cls.__name__
+
+
+@dataclass(frozen=True, slots=True)
+class Selector(Step):
+    query: str
+
+
+@dataclass(frozen=True, slots=True)
+class Eval(Step):
+    code: str
+
+
+@dataclass(frozen=True, slots=True)
+class EvalOn(Step):
+    code: str
+
+
+@dataclass(frozen=True, slots=True)
+class Hiccup(Step):
+    data: list | tuple
+
+
+@dataclass(frozen=True, slots=True)
+class Text(Step):
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class Morph(Step):
+    NAME = "MORPH"
+
+
+@dataclass(frozen=True, slots=True)
+class Prepend(Step):
+    NAME = "PREPEND"
+
+
+@dataclass(frozen=True, slots=True)
+class Append(Step):
+    NAME = "APPEND"
+
+
+@dataclass(frozen=True, slots=True)
+class Outer(Step):
+    NAME = "OUTER"
+
+
+@dataclass(frozen=True, slots=True)
+class Classes(Step):
+    NAME = "CLASSES"
+
+
+@dataclass(frozen=True, slots=True)
+class Add(Step):
+    NAME = "ADD"
+
+
+@dataclass(frozen=True, slots=True)
+class Toggle(Step):
+    NAME = "TOGGLE"
+
+
+@dataclass(frozen=True, slots=True)
+class Remove(Step):
+    NAME = "REMOVE"
+
+
+MORPH = Morph()
+PREPEND = Prepend()
+APPEND = Append()
+REMOVE = Remove()
+OUTER = Outer()
+CLASSES = Classes()
+ADD = Add()
+TOGGLE = Toggle()
+
+
+StepType = Selector | Eval | EvalOn | Hiccup | Text | Morph | Prepend | Append | Outer | Classes | Add | Toggle | Remove
+
+
+def _name(step: StepType) -> str:
+    return type(step).error_name()
+
+
+def _coerce(item) -> StepType:
+    match item:
+        case Step():
+            return item
+        case list() | tuple():
+            return Hiccup(item)
+        case str():
+            return Text(item)
+        case _:
+            raise TypeError(f"Cannot use {type(item).__name__} in patch chain")
+
+
+def _transition(state: State, step: StepType) -> State:
+    match state, step:
+        case State.START, Selector():
+            return State.SELECTED
+        case State.START, Eval():
+            return State.DONE
+
+        case State.SELECTED, Morph() | Prepend() | Append() | Outer():
+            return State.EFFECT
+        case State.SELECTED, Classes():
+            return State.CLASS_NAV
+        case State.SELECTED, Remove() | Eval() | EvalOn():
+            return State.DONE
+
+        case State.EFFECT, Hiccup() | Text():
+            return State.DONE
+
+        case State.CLASS_NAV, Add() | Remove() | Toggle():
+            return State.CLASS_EFFECT
+        case State.CLASS_EFFECT, Text():
+            return State.DONE
+
+        case State.DONE, _:
+            raise ValueError("chain is already complete")
+
+        case State.START, Remove():
+            raise ValueError("REMOVE requires a Selector before it")
+        case State.START, Morph() | Prepend() | Append() | Outer() | Classes():
+            raise ValueError(f"{_name(step)} requires a Selector before it")
+        case State.START, Add() | Toggle():
+            raise ValueError(f"{_name(step)} requires CLASSES before it")
+        case State.START, EvalOn():
+            raise ValueError("EvalOn requires a Selector before it")
+        case State.START, Hiccup() | Text():
+            raise ValueError("Data must follow an action")
+        case State.SELECTED, Add() | Toggle():
+            raise ValueError(f"{_name(step)} requires CLASSES before it")
+
+        case _:
+            raise ValueError(f"{_name(step)} cannot follow here")
+
+
+def _normalize(raw_items) -> tuple[StepType, ...]:
+    state = State.START
+    steps: list[StepType] = []
+    for item in raw_items:
+        step = _coerce(item)
+        state = _transition(state, step)
+        steps.append(step)
+    return tuple(steps)
+
+
+def _fresh_ref() -> str:
+    return f"_{next(_REF_COUNTER)}"
+
+
+def _selector_expr(query: str) -> Call:
+    return Call(Member(Id("document"), "querySelector"), (Str(query),))
+
+
+def _payload_html(step: StepType) -> str:
+    match step:
+        case Hiccup(data):
+            return render(data)
+        case Text(value):
+            return value
+        case _:
+            raise TypeError(f"Expected HTML payload, got {_name(step)}")
+
+
+def _lower_eval_on(code: str, ref: str) -> str:
+    if not code.startswith("=>"):
+        raise ValueError("EvalOn code must start with '=>'")
+    return _SLOT_PATTERN.sub(ref, code[2:].strip())
+
+
+def _compile(steps: tuple[StepType, ...]) -> Program:
+    match steps:
+        case (Eval(code),):
+            return Program((RawStmt(code),))
+
+        case (Selector(query), Eval(code)):
+            ref = _fresh_ref()
+            return Program((Const(ref, _selector_expr(query)), RawStmt(code)))
+
+        case (Selector(query), EvalOn(code)):
+            ref = _fresh_ref()
+            body = _lower_eval_on(code, ref)
+            return Program((Const(ref, _selector_expr(query)), RawStmt(body)))
+
+        case (Selector(query), Remove()):
+            ref = _fresh_ref()
+            stmt = ExprStmt(Call(Member(Id(ref), "remove", optional=True)))
+            return Program((Const(ref, _selector_expr(query)), stmt))
+
+        case (Selector(query), Morph(), Hiccup() | Text() as payload):
+            ref = _fresh_ref()
+            html = _payload_html(payload)
+            call = Call(Member(Id("Idiomorph"), "morph"), (Id(ref), Str(html)))
+            stmt = ExprStmt(And(Id(ref), call))
+            return Program((Const(ref, _selector_expr(query)), stmt))
+
+        case (Selector(query), Prepend(), Hiccup() | Text() as payload):
+            ref = _fresh_ref()
+            html = _payload_html(payload)
+            call = Call(Member(Id(ref), "insertAdjacentHTML", optional=True), (Str("afterbegin"), Str(html)))
+            stmt = ExprStmt(call)
+            return Program((Const(ref, _selector_expr(query)), stmt))
+
+        case (Selector(query), Append(), Hiccup() | Text() as payload):
+            ref = _fresh_ref()
+            html = _payload_html(payload)
+            call = Call(Member(Id(ref), "insertAdjacentHTML", optional=True), (Str("beforeend"), Str(html)))
+            stmt = ExprStmt(call)
+            return Program((Const(ref, _selector_expr(query)), stmt))
+
+        case (Selector(query), Outer(), Hiccup() | Text() as payload):
+            ref = _fresh_ref()
+            html = _payload_html(payload)
+            assign = ExprStmt(Assign(Member(Id(ref), "outerHTML"), Str(html)))
+            stmt = If(Id(ref), assign)
+            return Program((Const(ref, _selector_expr(query)), stmt))
+
+        case (Selector(query), Classes(), Add(), Text(value)):
+            ref = _fresh_ref()
+            callee = Member(Member(Id(ref), "classList", optional=True), "add")
+            stmt = ExprStmt(Call(callee, (Str(value),)))
+            return Program((Const(ref, _selector_expr(query)), stmt))
+
+        case (Selector(query), Classes(), Remove(), Text(value)):
+            ref = _fresh_ref()
+            callee = Member(Member(Id(ref), "classList", optional=True), "remove")
+            stmt = ExprStmt(Call(callee, (Str(value),)))
+            return Program((Const(ref, _selector_expr(query)), stmt))
+
+        case (Selector(query), Classes(), Toggle(), Text(value)):
+            ref = _fresh_ref()
+            callee = Member(Member(Id(ref), "classList", optional=True), "toggle")
+            stmt = ExprStmt(Call(callee, (Str(value),)))
+            return Program((Const(ref, _selector_expr(query)), stmt))
+
+        case _:
+            raise ValueError(f"Unsupported patch chain: {steps!r}")
+
+
+class DepthChain:
+    def __init__(self, depth: int, items=None):
+        self.depth = depth
+        self.items = tuple(items or ())
+
+    def __getitem__(self, item):
+        items = self.items + (item,)
+        steps = _normalize(items)
+        if len(items) >= self.depth:
+            return render_program(_compile(steps))
+        return DepthChain(self.depth, items)
+
+    def __str__(self):
+        return render_program(_compile(_normalize(self.items)))
+
+
+One   = DepthChain(1)
+Two   = DepthChain(2)
+Three = DepthChain(3)
+Four  = DepthChain(4)
+Five  = DepthChain(5)
+Six   = DepthChain(6)
+Seven = DepthChain(7)
+Eight = DepthChain(8)
+Nine  = DepthChain(9)
+Ten   = DepthChain(10)
+</file>
+
+<file path="pyproject.toml">
+[project]
+name = "evaleval"
+version = "0.2.5"
+description = "Signed snippets, hiccup, and a dual-eval loop. The web that should have been."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    {name = "Tommy Morriss"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Internet :: WWW/HTTP",
+]
+
+[project.urls]
+Homepage = "https://github.com/tommy-mor/evaleval"
+Repository = "https://github.com/tommy-mor/evaleval"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/evaleval"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+</file>
+
+<file path="README.md">
+# evaleval
+
+Browser DOM is modified _ONLY_ through *javascript code snippets* sent over the wire to the browers **eval** function.
+
+Backend actions execute _ONLY_ through *python code snippets* sent over the wire to python's **eval** function.
+
+```js
+import { Idiomorph } from 'idiomorph';
+window.Idiomorph = Idiomorph;
+
+const es = new EventSource('/sse');
+es.addEventListener('exec', e => eval(e.data));
+
+document.addEventListener('submit', async e => {
+  e.preventDefault();
+  const r = await fetch(e.target.action, { method: 'POST', body: new FormData(e.target) });
+  const t = await r.text();
+  if (t) eval(t);
+});
+```
+
+```python
+from evaleval import SnippetExecutionError
+
+@app.post("/")
+async def do(request):
+    form = await request.form()
+    try:
+        snippet = signer.verify_snippet(form)
+        return eval(snippet)
+
+    except SnippetExecutionError as e:
+        return PlainTextResponse(e.message, status_code=e.status_code)
+```
+
+## Example: [evaleval-todo](https://github.com/tommy-mor/evaleval-todo)
+
+`evaleval` also includes a quick implementation of clojure's [hiccup](https://github.com/weavejester/hiccup), a data-driven embedded DSL for rendering DOM nodes in an ergonomic way.
+
+Observe this example:
+```python
+from evaleval import Signer, Three, Two, Selector, MORPH, APPEND, REMOVE
+
+signer = Signer()
+
+def add_form():
+    return ["form", {"action": "/", "method": "post"},
+        *signer.snippet_hidden("add($new-todo-body)"),
+        ["input", {"type": "text", "name": "new-todo-body", "placeholder": "what needs doing?"}],
+        ["button", {"type": "submit"}, "add"],
+    ]
+```
+All forms have a handler. In a traditional stack, it would be pointed to by a url which points to a routing table which points to a handler function. In `evaleval`, the handler is _embedded into the form itself_.
+
+The `add($new-todo-body)` is sent directly to python's `eval` with `$new-todo-body` sent through python's `repr` and spliced into the python source string. The source string must be an expression not a statement, as it must have a return value. Because as you'll see later, the result of `eval` is _returned directly to the client_.
+
+So the handler function from the form is called directly with form arguments. And it returns javscript code. Now how do you write js snippets ergonomically in python? You could write them directly:
+```python
+def add(text):
+    t = {"id": uuid.uuid4().hex[:8], "text": text, "done": False}
+    TODOS.append(t)
+    escaped = t["text"].replace("`", "\\`")
+    return PlainTextResponse(f"""
+Idiomorph.morph(document.querySelector('#add-form'), `<form id="add-form">...</form>`);
+document.querySelector('#todo-list').insertAdjacentHTML('beforeend', `<li id="todo-{t["id"]}">{escaped}</li>`);
+Idiomorph.morph(document.querySelector('p.count'), `<p class="count">...</p>`);
+console.log('todo added', {text!r});
+""")
+```
+
+Ew.
+
+However, I have instead built an embedded data-driven DSL much like [specter](https://github.com/redplanetlabs/specter), which lets you construct js snippets in fluent python.
+The number we are indexing into is the arity of how deep we can index into until it executes the path, rendering it into a js string.
+The details of this process are fairly simple and are described [here](https://github.com/tommy-mor/evaleval/blob/main/src/evaleval/patch.py).
+The indexable arity objects are also just very cool.
+
+The most common arity path pattern is `Three[dom selector][action][hiccup data]`.
+
+
+```python
+def add(text):
+    t = {"id": uuid.uuid4().hex[:8], "text": text, "done": False}
+    TODOS.append(t)
+    return PlainTextResponse(";".join([
+        Three[Selector("#add-form")][MORPH][add_form()],
+        Three[Selector("#todo-list")][APPEND][todo_item(t)],
+        Three[Selector("p.count")][MORPH][remaining_count()],
+        f"console.log('todo added', {text})"
+    ]))
+
+def delete(todo_id):
+    TODOS.remove(_find(todo_id))
+    return PlainTextResponse(";".join([
+        Two[Selector(f"#todo-{todo_id}")][REMOVE],
+        Three[Selector("p.count")][MORPH][remaining_count()],
+    ]))
+```
+
+These js snippets go directly into the browser's `eval` function, so you can do whatever you want.
+
+```python
+Two[Selector("#progress-bar")][EvalOn(f"=> $.width = '{width}%'")]
+```
+# Security
+
+Verify snippet consumes the nonce, so for each GET you can only press each button once.
+Verify snippet checks the HMAC against the provided snippet, restricting code running on the server to be only code that the server itself produces. 
+So if a user can't do an action, don't sign a snippet with that action for them.
+
+Notice this line in the todo submit form handler:
+
+```python
+Three[Selector("#add-form")][MORPH][add_form()],
+```
+
+This is neceseary. Because each action is only allowed exactly once per GET. But you don't want to have to reGET the page to send another todo. So a new nonce is required to be generated by add_form(), which returns hiccup, which is rendered to an htmlstring, which is morphed into the dom at `#add-form`.
+
+Each snippet is not only a continuation, but also a capability ticket.
+
+`uv install evaleval`
+</file>
+
+</files>

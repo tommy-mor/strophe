@@ -1,5 +1,6 @@
 """
-JsonlStore — append-only typed event log with in-memory cache and asyncio write lock.
+JsonlStore — append-only typed event log. The file is the source of truth.
+Consumers own their in-memory state by replaying events from read().
 
 Usage:
     from evaleval import event, JsonlStore
@@ -12,7 +13,7 @@ Usage:
 
     store = JsonlStore("/data/ledger.jsonl")
 
-    # read (in-memory, no I/O)
+    # read from disk
     events = store.read()
 
     # append under write lock
@@ -66,26 +67,31 @@ def from_dict(d: dict) -> Any | None:
 
 class JsonlStore:
     """
-    Append-only JSONL event log.
-    - In-memory cache: read() is O(1), no file I/O.
-    - asyncio.Lock hidden internally: append() and atomic() are safe across coroutines.
-    - atomic(fn): fn receives the current event list and returns an event or None.
-      The read + fn + optional write happen under the lock, so fn sees a consistent
-      snapshot and no other writer can interleave. fn must be synchronous.
-    - migrate: optional callable applied to each raw dict during replay, before
-      deserialization. Use for schema evolution (type renames, field renames, etc.).
+    Append-only JSONL event log. No in-memory cache — the file is the source of truth.
+
+    read() reads from disk on every call. For large files called frequently,
+    callers should cache the result themselves (e.g. in a Being or AppState object).
+
+    - asyncio.Lock on append() and atomic() prevents concurrent writes.
+    - atomic(fn): fn receives the current event list (read from disk) and returns
+      an event or None. The read + fn + optional write happen under the lock.
+      fn must be synchronous.
+    - write_sync(e): sync write, no lock. Only safe before the event loop starts
+      (e.g. during initialization).
+    - migrate: optional callable applied to each raw dict during deserialization.
+      Use for schema evolution (type renames, field renames, etc.).
     """
 
     def __init__(self, path: pathlib.Path | str, migrate: Optional[Callable[[dict], dict]] = None):
         self.path = pathlib.Path(path)
         self._lock = asyncio.Lock()
         self._migrate = migrate
-        self._events: list = []
-        self._replay()
 
-    def _replay(self) -> None:
+    def _deserialize(self) -> list:
+        """Read and deserialize the entire file from disk."""
+        events = []
         if not self.path.exists():
-            return
+            return events
         with open(self.path) as f:
             for line in f:
                 if line.strip():
@@ -94,7 +100,8 @@ class JsonlStore:
                         d = self._migrate(d)
                     e = from_dict(d)
                     if e is not None:
-                        self._events.append(e)
+                        events.append(e)
+        return events
 
     def _write_sync(self, e: Any) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,28 +112,26 @@ class JsonlStore:
         """Sync write — only safe when no concurrent coroutines hold a reference to this store.
         Intended for initialization before an event loop is running."""
         self._write_sync(e)
-        self._events.append(e)
 
     def read(self) -> list:
-        """Return a snapshot of all events. In-memory — no I/O."""
-        return list(self._events)
+        """Read all events from disk and return them."""
+        return self._deserialize()
 
     async def append(self, e: Any) -> None:
-        """Append one event to the file and cache under the write lock."""
+        """Append one event to the file under the write lock."""
         async with self._lock:
             self._write_sync(e)
-            self._events.append(e)
 
     async def atomic(self, fn: Callable[[list], Any]) -> Any:
         """
-        Under the write lock: call fn(current_events).
-        If fn returns a non-None value, append it to the log and cache.
+        Under the write lock: read events from disk, call fn(events).
+        If fn returns a non-None value, append it to the log.
         Returns whatever fn returns (event or None).
         fn must be synchronous — no awaits inside.
         """
         async with self._lock:
-            result = fn(self._events)
+            events = self._deserialize()
+            result = fn(events)
             if result is not None:
                 self._write_sync(result)
-                self._events.append(result)
             return result
